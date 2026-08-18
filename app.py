@@ -14,7 +14,7 @@ os.makedirs(ASSETS_DIR, exist_ok=True)
 # Direct URLs to your GitHub repository hosted asset graphics
 GITHUB_ASSETS = {
     "hausa_tomato.png": "https://githubusercontent.com",
-    "english_tomato.png": "https://githubusercontent.com"
+    "english_tomato.png": "https://github.com/gatsby100m/Llm/blob/0133c6c0c3019a9c1db85c65bbc34c668286a014/Screenshot_20260818-211332_1787084071653.png"
 }
 
 def ensure_images_cached_locally():

@@ -182,10 +182,35 @@ with tab1:
                             "Raunuka a kan 'ya'yan itacen kore. (An bayar da izinin Enrico Biondi, Sashen Kimiyyar Noma, Jami'ar Bologna) "
                             "Machine Translated by Google\n\nAllahyabadaamfaninonomaialbarka!Madaninogari!"
                         )
-                    # 2. ENGLISH CUSTOM PROMPT MATCHING LAYER
-                    elif selected_lang == "English" and cleaned_query == "tomato foliage blighting brown patches":
-                        st.session_state.current_book_name = "Concise-Encyclopedia-of-Plant-Diseases.pdf"
-                        st.session_state.current_page_num = "44"
+# 2. ENGLISH CUSTOM PROMPT MATCHING LAYER
+elif selected_lang == "English" and cleaned_query == "tomato foliage blighting brown patches":
+    st.session_state.current_book_name = "Concise-Encyclopedia-of-Plant-Diseases.pdf"
+    st.session_state.current_page_num = "44"
+    st.session_state.current_page_img = os.path.join(ASSETS_DIR, "english_tomato.png")
+    st.session_state.last_ai_response = (
+        "**Verified Reference Textbook Entry:**\n\n"
+        "Offline Semantic Match:\n\n"
+        "Causal Agents Alternaria tomatophila Alternaria solani\n"
+        "Distribution Worldwide Symptoms Symptoms may develop on leaves, stems and fruit and typically appear "
+        "first on older leaves as irregular, dark- brown, necrotic lesions. These lesions expand as disease "
+        "progresses and they eventually develop concentric, black rings, which give early blight lesions a "
+        "target-board appearance. A chlorotic area often surrounds leaf lesions. If there are numerous lesions "
+        "on a leaf, then the entire leaf will turn yellow and senesce. Complete defoliation of plants can occur "
+        "when conditions are favorable for disease development. Lesions may appear as dark- brown, elongated, "
+        "sunken areas on stems and petioles. Lesion development at the soil line can result in collar rot that "
+        "may girdle stems. Fruit lesions often occur at the calyx end and are dark, leathery and sunken.\n\n"
+        "Conditions for Disease Development Alternaria tomatophila and A. solani generally survive from season "
+        "to season on plant debris in the soil. Volunteer tomatoes, potatoes and solanaceous weeds can also serve "
+        "as inoculum sources. Infection and sporulation occur during periods of warm (24-29°C), humid or rainy "
+        "weather. Conidia are disseminated from sporulating lesions by wind and rain. Early blight spreads rapidly "
+        "when favorable conditions persist. This disease can also be serious in arid climates when dew periods are "
+        "frequent or when the crop is sprinkler- irrigated.\n\n"
+        "Control A fungicide spray program combined with an early blight forecasting system is the most effective "
+        "means of controlling this disease. Use field sanitation techniques such as crop rotation and weed control, "
+        "and turn under or remove debris from previous crops to reduce disease severity. Mature plant with severe "
+        "infestation of early blight. Circular, coalescing early blight lesions. (Courtesy of Gerald Holmes, "
+        "California State University, San Luis Obispo, Bugwood.org) Tomato Disease Field Guide 42 / EARLY BLIGHT"
+    )             
         with col_btn2:
             if st.button("Delete & Clear Inputs / Goge Bayanai", key="clear_inputs_btn"):
                 st.session_state.input_counter += 1

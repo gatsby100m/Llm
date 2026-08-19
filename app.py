@@ -360,3 +360,8 @@ with tab3:
         st.download_button(label="⬇ Download Ledger as CSV", data=csv_data, file_name="ledger_download.csv", mime="text/csv", key="download_ledger_tab3_btn")
     except Exception:
         st.info("Please fill in or save your ledger data above to enable downloading.")
+
+# --- ADVISORY DISPLAY ENGINE ---
+if st.session_state.get("last_ai_response"):
+    st.markdown("### 📋 Diagnostic Results / Sakamakon Bincike")
+    st.markdown(st.session_state.last_ai_response)

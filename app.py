@@ -183,7 +183,16 @@ with tab1:
                             "Machine Translated by Google\n\nAllahyabadaamfaninonomaialbarka!Madaninogari!"
                         )
 # 2. ENGLISH CUSTOM PROMPT MATCHING LAYER
+# 1. Capture the user input from your text box
+user_query = st.text_input("Enter your plant disease symptoms / Shigar da alamun rashin lafiya:")
+
+# FIX: Define 'cleaned_query' so Python can read it in the layers below
+cleaned_query = user_query.strip().lower()
+
+# 2. Your conditional string matching layers start here
 if selected_lang == "English" and cleaned_query == "some other query":
+    pass
+
     # block of code here
     st.session_state.current_page_num = "43" 
 

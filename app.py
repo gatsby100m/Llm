@@ -225,9 +225,9 @@ elif selected_lang == "English" and cleaned_query == "tomato foliage blighting b
                 st.rerun()
 
             if st.session_state.last_ai_response:
-               st.markdown("---")
-               st.subheader("Advisor Response" if selected_lang == "English" else "Shafar Shawarwari")
-               st.write(st.session_state.last_ai_response)
+                st.markdown("---")
+                st.subheader("Advisor Response" if selected_lang == "English" else "Shafar Shawarwari")
+                st.write(st.session_state.last_ai_response)
 
     with col_viewer:
         st.subheader("Encyclopedia Reference Viewer" if selected_lang == "English" else "Shafar Karatun Littafi")

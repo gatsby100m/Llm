@@ -183,6 +183,10 @@ with tab1:
                             "Machine Translated by Google\n\nAllahyabadaamfaninonomaialbarka!Madaninogari!"
                         )
 # 2. ENGLISH CUSTOM PROMPT MATCHING LAYER
+if selected_lang == "English" and cleaned_query == "some other query":
+    # block of code here
+    st.session_state.current_page_num = "43" 
+
 elif selected_lang == "English" and cleaned_query == "tomato foliage blighting brown patches":
     st.session_state.current_book_name = "Concise-Encyclopedia-of-Plant-Diseases.pdf"
     st.session_state.current_page_num = "44"

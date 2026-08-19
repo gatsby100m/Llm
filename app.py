@@ -193,14 +193,11 @@ cleaned_query = user_query.strip().lower()
 if selected_lang == "English" and cleaned_query == "some other query":
     pass
 
-    # block of code here
-    st.session_state.current_page_num = "43" 
-
 elif selected_lang == "English" and cleaned_query == "tomato foliage blighting brown patches":
     st.session_state.current_book_name = "Concise-Encyclopedia-of-Plant-Diseases.pdf"
     st.session_state.current_page_num = "44"
     st.session_state.current_page_img = os.path.join(ASSETS_DIR, "english_tomato.png")
-    st.session_state.last_ai_response = """
+    st.session_state.last_ai_response = (
         "**Verified Reference Textbook Entry:**\n\n"
         "Offline Semantic Match:\n\n"
         "Causal Agents Alternaria tomatophila Alternaria solani\n"
@@ -223,7 +220,7 @@ elif selected_lang == "English" and cleaned_query == "tomato foliage blighting b
         "and turn under or remove debris from previous crops to reduce disease severity. Mature plant with severe "
         "infestation of early blight. Circular, coalescing early blight lesions. (Courtesy of Gerald Holmes, "
         "California State University, San Luis Obispo, Bugwood.org) Tomato Disease Field Guide 42 / EARLY BLIGHT"
-"""             
+    )
     with col_btn2:
             if st.button("Delete & Clear Inputs / Goge Bayanai", key="clear_inputs_btn"):
                 st.session_state.input_counter += 1

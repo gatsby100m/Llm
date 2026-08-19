@@ -214,7 +214,7 @@ elif selected_lang == "English" and cleaned_query == "tomato foliage blighting b
         "and turn under or remove debris from previous crops to reduce disease severity. Mature plant with severe "
         "infestation of early blight. Circular, coalescing early blight lesions. (Courtesy of Gerald Holmes, "
         "California State University, San Luis Obispo, Bugwood.org) Tomato Disease Field Guide 42 / EARLY BLIGHT"
-    """             
+"""             
         with col_btn2:
             if st.button("Delete & Clear Inputs / Goge Bayanai", key="clear_inputs_btn"):
                 st.session_state.input_counter += 1

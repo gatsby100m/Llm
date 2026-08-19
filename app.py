@@ -193,7 +193,7 @@ cleaned_query = user_query.strip().lower()
 if selected_lang == "English" and cleaned_query == "some other query":
     pass
 
-elif selected_lang == "English" and cleaned_query == "tomato foliage blighting brown patches":
+if selected_lang == "English" and cleaned_query == "tomato foliage blighting brown patches":
     st.session_state.current_book_name = "Concise-Encyclopedia-of-Plant-Diseases.pdf"
     st.session_state.current_page_num = "44"
     st.session_state.current_page_img = os.path.join(ASSETS_DIR, "english_tomato.png")

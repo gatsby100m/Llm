@@ -2,48 +2,344 @@ import os
 import re
 import datetime
 import time
-import urllib.request
+import numpy as np
 import streamlit as st
 
-# =====================================================================
-# SYSTEM INITIALIZATION & LOCAL ASSETS STORAGE
-# =====================================================================
-ASSETS_DIR = "local_assets"
-os.makedirs(ASSETS_DIR, exist_ok=True)
+# Safe background wrappers for offline model tracking and document scanning
+try:
+    from llama_cpp import Llama
+    LLAMA_AVAILABLE = True
+except ImportError:
+    LLAMA_AVAILABLE = False
 
-# Direct URLs to your GitHub repository hosted asset graphics
-GITHUB_ASSETS = {
-    "hausa_tomato.png": "https://github.com/gatsby100m/Llm/raw/ee81fb43373135b70a716ae16a37c1813d64454c/Screenshot_20260818-211247_1787084103277.png",
-    "english_tomato.png": "https://github.com/gatsby100m/Llm/raw/0133c6c0c3019a9c1db85c65bbc34c668286a014/Screenshot_20260818-211332_1787084071653.png"
+try:
+    from sentence_transformers import SentenceTransformer, util
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
+
+try:
+    from pypdf import PdfReader
+    from pdf2image import convert_from_path
+    PDF_LIBS_AVAILABLE = True
+except ImportError:
+    PDF_LIBS_AVAILABLE = False
+
+#=====================================================================
+# PATH AND DATA CONTEXT STORAGE SYSTEM
+#=====================================================================
+MODEL_DIR = "models"
+MODEL_NAME = "qwen2.5-0.5b-instruct-q4_k_m.gguf"
+MODEL_PATH = os.path.join(MODEL_DIR, MODEL_NAME)
+
+RAG_DIR = "rag_data"
+CACHE_DIR = "page_cache"
+
+os.makedirs(MODEL_DIR, exist_ok=True)
+os.makedirs(RAG_DIR, exist_ok=True)
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+# FORCE SYSTEM PERMISSIONS IMMEDIATELY AT RUNTIME
+os.chmod(CACHE_DIR, 0o777)
+
+# Google Drive IDs mapped cleanly for automated retrieval scripts
+KNOWLEDGE_BASE = {
+    "english": {
+        "VegetablesbyBayerTomatoDiseaseGuide.pdf": "1lziyd4oXiiWK8zGBzz9zz12JSRlOiufy",
+        "Man_Maize_diseases_CIMMYT.pdf": "1LzwK91UP8sBZ0dgnAWgjTfX9bXKTl0zS",
+        "PRODUCTION-GUIDE-ON-TOMATO.pdf": "1BLWpBleJzN8icgpoyJuiwJRtgSK9Z8Rw",
+        "PestanddiseasemanualallPRAMandASHC.pdf": "1aFo6Y57zheat6-FgwttnbBzwnHFl9EjL",
+        "Concise-Encyclopedia-of-Plant-Diseases.pdf": "1ugRejJFvFKKCeTRR5jWrehYw6TUzaJZB"
+    },
+    "hausa": {
+        "VegetablesbyBayerTomatoDiseaseGuide_ha.pdf": "1gQ29XZTsMYNS6kdA22rUG18iML6q6ZHA",
+        "Man_Maize_diseases_CIMMYT_ha.pdf": "14U3dBZSdbJI5j07jpzj61wLh6lwxLAyD",
+        "PRODUCTION-GUIDE-ON-TOMATO_ha.pdf": "1jokdh9e3D1UVnYm-vrC5ov3tXwgS1KsY",
+        "PestanddiseasemanualallPRAMandASHC_ha.pdf": "1KRdC35MF1VLqgGzO3A6W5HUoaoNgDUWM",
+        "Concise-Encyclopedia-of-Plant-Diseases_ha.pdf": "1cJgi9eGnx35CEMFziMoE8nyEKmfHoWxi"
+    }
 }
+def ensure_books_exist():
+    """Validates local directories and downloads missing core textbooks dynamically via gdown."""
+    try:
+        import gdown
+    except ImportError:
+        # If offline, this system call won't crash the Streamlit app interface
+        try:
+            os.system("pip install gdown")
+            import gdown
+        except Exception:
+            return
 
-def ensure_images_cached_locally():
-    """Downloads graphics during first online run so they remain 100% available offline."""
-    for filename, url in GITHUB_ASSETS.items():
-        local_path = os.path.join(ASSETS_DIR, filename)
-        if not os.path.exists(local_path):
+    for lang, books in KNOWLEDGE_BASE.items():
+        lang_dir = os.path.join(RAG_DIR, lang)
+        os.makedirs(lang_dir, exist_ok=True)
+        for filename, file_id in books.items():
+            destination_path = os.path.join(lang_dir, filename)
+            # Checks local disk first to avoid touching the network if file is present
+            if not os.path.exists(destination_path):
+                try:
+                    with st.spinner(f"Downloading {filename} from cloud systems..."):
+                        gdown.download(id=file_id, output=destination_path, quiet=True)
+                except Exception:
+                    pass
+
+# SAFETY NET FOR LINE 81: Wrap the call so the app starts smoothly even if completely offline
+try:
+    ensure_books_exist()
+except Exception:
+    pass
+
+def ensure_model_exists():
+    """Checks for the Qwen GGUF model and auto-downloads it from Hugging Face if missing."""
+    if not os.path.exists(MODEL_PATH):
+        hf_url = f"https://huggingface.co"
+        st.info(" GGUF Model file not found. Starting automatic download from Hugging Face (~382MB)...")
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        try:
+            import urllib.request
+            def download_progress(count, block_size, total_size):
+                percent = min(int(count * block_size * 100 / total_size), 100)
+                progress_bar.progress(percent / 100)
+                status_text.text(f"Downloading model: {percent}% complete")
+            urllib.request.urlretrieve(hf_url, MODEL_PATH, reporthook=download_progress)
+            st.success("Model downloaded successfully! Initializing LLM engine...")
+            status_text.empty()
+            progress_bar.empty()
+        except Exception as e:
+            st.error(f"Failed to download model from Hugging Face: {e}")
+
+# Trigger the model downloader alongside your book checks
+ensure_model_exists()
+
+#=====================================================================
+# MEMORY PRESERVATION ENGINE LOGIC
+#=====================================================================
+@st.cache_resource
+def load_ai_models():
+    """Safely instantiates embedding models and local quantized LLM cores in global space."""
+    loaded_encoder = None
+    loaded_llm = None
+    if TRANSFORMERS_AVAILABLE:
+        try:
+            loaded_encoder = SentenceTransformer("all-MiniLM-L6-v2")
+        except Exception:
+            pass
+    if LLAMA_AVAILABLE and os.path.exists(MODEL_PATH):
+        try:
+            loaded_llm = Llama(model_path=MODEL_PATH, n_ctx=2048, verbose=False)
+        except Exception:
+            pass
+    return loaded_encoder, loaded_llm
+
+encoder, llm = load_ai_models()
+
+#=========================================================================
+# MULTILINGUAL DOCUMENT SEGMENTATION AND VECTOR SCHEMAS
+#=========================================================================
+@st.cache_resource
+def index_english_library():
+    """Extracts, filters, and indexes text segments from English crop libraries."""
+    fallback = {"chunks": [], "metadata": [], "embeddings": None}
+    if not TRANSFORMERS_AVAILABLE or not PDF_LIBS_AVAILABLE or encoder is None:
+        return fallback
+    english_dir = os.path.join(RAG_DIR, "english")
+    if not os.path.exists(english_dir):
+        return fallback
+    chunks, metadata = [], []
+    for filename in os.listdir(english_dir):
+        if filename.endswith(".pdf"):
+            file_path = os.path.join(english_dir, filename)
             try:
-                urllib.request.urlretrieve(url, local_path)
+                reader = PdfReader(file_path)
+                for idx, page in enumerate(reader.pages):
+                    raw_text = page.extract_text() or ""
+                    if len(raw_text.strip()) > 50:
+                        chunks.append(raw_text)
+                        metadata.append({"file_name": filename, "file_path": file_path, "page_num": idx + 1})
             except Exception:
-                pass
+                continue
+    if chunks:
+        try:
+            embeddings = encoder.encode(chunks, convert_to_tensor=True, show_progress_bar=False)
+            return {"chunks": chunks, "metadata": metadata, "embeddings": embeddings}
+        except Exception:
+            return fallback
+    return fallback
 
-ensure_images_cached_locally()
+@st.cache_resource
+def index_hausa_library():
+    """Extracts, filters, and indexes text segments from Hausa crop libraries."""
+    fallback = {"chunks": [], "metadata": [], "embeddings": None}
+    if not TRANSFORMERS_AVAILABLE or not PDF_LIBS_AVAILABLE or encoder is None:
+        return fallback
+    hausa_dir = os.path.join(RAG_DIR, "hausa")
+    if not os.path.exists(hausa_dir):
+        return fallback
+    chunks, metadata = [], []
+    for filename in os.listdir(hausa_dir):
+        if filename.endswith(".pdf"):
+            file_path = os.path.join(hausa_dir, filename)
+            try:
+                reader = PdfReader(file_path)
+                for idx, page in enumerate(reader.pages):
+                    raw_text = page.extract_text() or ""
+                    if len(raw_text.strip()) > 50:
+                        chunks.append(raw_text)
+                        metadata.append({"file_name": filename, "file_path": file_path, "page_num": idx + 1})
+            except Exception:
+                continue
+    if chunks:
+        try:
+            embeddings = encoder.encode(chunks, convert_to_tensor=True, show_progress_bar=False)
+            return {"chunks": chunks, "metadata": metadata, "embeddings": embeddings}
+        except Exception:
+            return fallback
+    return fallback
 
-# =====================================================================
-# TRANSLATION DICTIONARY AND STATE SYSTEMS
-# =====================================================================
+# Instantiate persistent context storage indices
+english_db = index_english_library()
+hausa_db = index_hausa_library()
+
+# Backwards compatibility configuration layers
+db_chunks = english_db["chunks"]
+db_metadata = english_db["metadata"]
+db_embeddings = english_db["embeddings"]
 CULTURAL_PROVERBS = [
-    "Yoruba: Bí ẹniyàn bá șegbingbin, béèni yóò șe kórè. (As we sow, so shall we reap.)",
-    "Hausa: Mai hakuri yukan dafa dutse har ya sha romonsa. (The patient farmer cooks a stone and drinks its soup.)",
-    "Swahili: Mvumilivu hula mbivu. (A patient person eats ripe fruit.)",
-    "Igbo: Onye gbam bona ubi, owuwe ihe ubi ga-asacha anya mmiri ya. (He who labors in the field will have his tears wiped by the harvest.)"
+    "Yoruba: Bí ẹniyàn bá șegbingbin, béèni yóò șekórè. (As we sow, so shall we reap.)",
+    "Hausa: Mai Hakuri yukan dafa dutse har ya sha romonsa. (The patient farmer cooks a stone and drinks its soup.)",
+    "Swahili: Mvumilivuh kula mbivu. (A patient person eats ripe fruit.)",
+    "Igbo: Onye gbambo na ubi, owuwe ihe ubi ga-asacha anya mmiri ya. (He who labors in the field will have his tears wiped by the harvest.)"
 ]
 
+# Thread-safe persistent application state configurations
+if "revenue" not in st.session_state: st.session_state.revenue = 0.0
+if "labour_cost" not in st.session_state: st.session_state.labour_cost = 0.0
+if "fertilizer_cost" not in st.session_state: st.session_state.fertilizer_cost = 0.0
+if "equipment_cost" not in st.session_state: st.session_state.equipment_cost = 0.0
+if "other_expenses" not in st.session_state: st.session_state.other_expenses = 0.0
+if "input_counter" not in st.session_state: st.session_state.input_counter = 0
+if "current_page_img" not in st.session_state: st.session_state.current_page_img = None
+if "current_page_num" not in st.session_state: st.session_state.current_page_num = None
+if "current_book_name" not in st.session_state: st.session_state.current_book_name = None
+
+#=====================================================================
+# INFERENCE INTERACTION ENGINE
+#=====================================================================
+def run_ai_advisory(user_input, lang):
+    """Processes search arrays, retrieves reference pages cleanly, and enforces 0.0 deterministic bounds."""
+    cultural_closing = "\n\n*Allahu ya bada amfanin gona mai albarka! Madalla da yin nagari!*" if lang == "Hausa" else "\n\n*May your harvest be heavy and rewarding!*"
+    
+    # 1. Establish strict guardrail system prompts
+    if lang == "Hausa":
+        active_db = hausa_db
+        fallback_msg = "Ba a sami alamun cutar a cikin littafin gona ba. Don Allah a sake duba alamun."
+        system_instruction = (
+            "Kai babban masanin shawarwari na aikin gona ne na Afirka.\n"
+            "HAKKI: Ordered to use information from 'Bayani Daga Littafi' ONLY to answer the question.\n"
+            "Idan bayanan ba su ƙunshi amsar ba, dan na rubuta: 'Symptom ba a samu a cikin littafin gona ba.'\n"
+            "GARGADI: Kada ka yi amfani da sanin kanka na ciki. Rubuta amsarka cikin Harshen Hausa kawai."
+        )
+        context_label = "Bayani Daga Littafi"
+    else:
+        active_db = english_db
+        fallback_msg = "Symptom not found in the local textbook manual. Please try rephrasing."
+        system_instruction = (
+            "You are a strict, offline African agricultural text reader.\n"
+            "CRITICAL ORDER: Answer the user's question using ONLY the provided 'FactsheetContext' below.\n"
+            "If the context does not explicitly mention or resolve the issue, your final answer MUST be exactly:\n"
+            "'Symptom not found in the local textbook manual.'\n"
+            "Do NOT use external pre-trained knowledge, do NOT extrapolate, and do NOT create fake citations."
+        )
+        context_label = "FactsheetContext"
+
+    matched_fact = ""
+
+    # 2. Vector Search Retrieval with a strict Similarity Score Threshold
+    if encoder is not None and active_db["embeddings"] is not None and len(active_db["chunks"]) > 0:
+        try:
+            query_embedding = encoder.encode(user_input, convert_to_tensor=True)
+            cos_scores = util.cos_sim(query_embedding, active_db["embeddings"]).cpu().numpy()[0]
+            best_match_idx = int(np.argmax(cos_scores))
+            highest_score = cos_scores[best_match_idx]
+            
+            # CRITICAL THRESHOLD: If the book does not match the query by at least 30%, reject it
+            if highest_score >= 0.30:
+                matched_fact = active_db["chunks"][best_match_idx]
+                best_match_meta = active_db["metadata"][best_match_idx]
+                st.session_state.current_page_num = best_match_meta["page_num"]
+                st.session_state.current_book_name = best_match_meta["file_name"]
+                
+                if PDF_LIBS_AVAILABLE:
+                    images = convert_from_path(
+                        best_match_meta["file_path"],
+                        first_page=best_match_meta["page_num"],
+                        last_page=best_match_meta["page_num"]
+                    )
+                    if images:
+                        img_path = os.path.join(CACHE_DIR, f"rendered_page_{lang.lower()}.png")
+                        # FIX: convert_from_path returns a list; access index 0 to save the image
+                        images[0].save(img_path, "PNG")
+                        st.session_state.current_page_img = img_path
+            else:
+                # Force fallback if similarity score is too low
+                return f"{fallback_msg}{cultural_closing}"
+        except Exception as e:
+            st.error(f"Error rendering PDF page image: {e}")
+
+    # Fallback to structural message if the database is dry or empty
+    if not matched_fact.strip():
+        return f"{fallback_msg}{cultural_closing}"
+        
+    # STRATEGIC FORCED ROUTING: Use raw text match for Hausa, require LLM for English
+    if lang == "Hausa":
+        prefix = "**Tabbataccen Bayani Daga Littafi:**\n\n"
+        return f"{prefix}{matched_fact}{cultural_closing}"
+        
+    # English path continues to the LLM core processor
+    if (not LLAMA_AVAILABLE) or (llm is None):
+        prefix = "**Offline Semantic Match:**\n\n"
+        return f"{prefix}{matched_fact}{cultural_closing}"
+        
+    # 3. Secure prompt payload creation for English LLM generation
+    try:
+        prompt = (
+            f"<|im_start|>system\n{system_instruction}\n{context_label}:{matched_fact}<|im_end|>\n"
+            f"<|im_start|>user\n{user_input}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+        
+        # Enforcing exact 0.0 behavior configurations for English
+        response = llm(
+            prompt,
+            max_tokens=200,
+            temperature=0.0,  # Strict accuracy lock
+            top_p=1.0,
+            repeat_penalty=1.1,
+            stop=["<|im_end|>", "<|im_start|>", "User:", "System:"]
+        )
+        
+        ai_response = response['choices']['text'].strip()
+        ai_response = re.sub(r'[\u4e00-\u9fff]+', '', ai_response)  # Cleanup formatting artifacts
+        
+        if len(ai_response) <= 3:
+            ai_response = f"Farming Truth Block: {matched_fact}"
+            
+        return f"{ai_response}{cultural_closing}"
+        
+    except Exception:
+        # If the LLM engine fails or runs out of memory, safely output the raw textbook text
+        prefix = "**Offline Semantic Match:**\n\n"
+        return f"{prefix}{matched_fact}{cultural_closing}"
+#=====================================================================
+# DICTIONARY TRANSLATION DICTIONARY (Fixed Missing Tab Elements)
+#=====================================================================
 LANG_DICT = {
     "English": {
-        "title": "SmartFarmAssistant",
+        "title": " SmartFarmAssistant",
         "subtitle": "AI-Powered West African Crop Advisor & Ledger Engine",
-        "proverb_title": "Cultural Farm Wisdom",
+        "proverb_title": " Cultural Farm Wisdom",
         "submit_btn": "Analyze Symptoms",
         "crop_select": "Select Your Crop Type:",
         "date_input": "Select Planting Date:",
@@ -56,9 +352,9 @@ LANG_DICT = {
         "finance_tab": "Financial Ledger"
     },
     "Hausa": {
-        "title": "Mataimakin Manomi na AI",
+        "title": " Mataimakin Manomi na AI",
         "subtitle": "Kwamfutar Shawarwari da Jagorancin Kudaden Gona",
-        "proverb_title": "Karin Maganar Manoma",
+        "proverb_title": " Karin Maganar Manoma",
         "submit_btn": "Bincika Alamomi",
         "crop_select": "Zabi Irin Amfanin Gona:",
         "date_input": "Zabi Ranar Shuka:",
@@ -72,26 +368,15 @@ LANG_DICT = {
     }
 }
 
-if "revenue" not in st.session_state: st.session_state.revenue = 0.0
-if "labour_cost" not in st.session_state: st.session_state.labour_cost = 0.0
-if "fertilizer_cost" not in st.session_state: st.session_state.fertilizer_cost = 0.0
-if "equipment_cost" not in st.session_state: st.session_state.equipment_cost = 0.0
-if "other_expenses" not in st.session_state: st.session_state.other_expenses = 0.0
-if "input_counter" not in st.session_state: st.session_state.input_counter = 0
-if "current_page_img" not in st.session_state: st.session_state.current_page_img = None
-if "current_page_num" not in st.session_state: st.session_state.current_page_num = None
-if "current_book_name" not in st.session_state: st.session_state.current_book_name = None
-if "last_ai_response" not in st.session_state: st.session_state.last_ai_response = None
-
-# =====================================================================
-# UI HEADERS AND DEPLOYMENT STATUS BANNER
-# =====================================================================
-st.success("✅ Application running in AI core mode. All local neural weights and system pathways are active and optimized.")
+if llm is None:
+    st.warning("Application running in fallback lookup mode. AI vector features require active weights storage paths.")
+else:
+    st.success("AI Core, Multilingual Vector Map, and Local LLM Engine loaded successfully!")
 
 col_lang, col_prov = st.columns(2)
 with col_lang:
     selected_lang = st.selectbox("Language / Yare", ["English", "Hausa"])
-labels = LANG_DICT[selected_lang]
+    labels = LANG_DICT[selected_lang]
 
 with col_prov:
     prov_idx = int(time.time() // 10) % len(CULTURAL_PROVERBS)
@@ -100,9 +385,6 @@ with col_prov:
 st.title(labels["title"])
 st.subheader(labels["subtitle"])
 
-# =====================================================================
-# CALCULATION MECHANICS AND LOGIC PARSERS
-# =====================================================================
 def calculate_crop_timeline(crop, planting_date):
     try:
         if crop == "Maize":
@@ -127,9 +409,6 @@ def parse_financial_statement(statement_text):
     numbers = [float(s) for s in re.findall(r'\d+', text_lower)]
     amount = numbers if numbers else 0.0
     
-    if amount == 0.0:
-        return "No valid transaction digits identified. Please specify numbers."
-
     if "sold" in text_lower or "sayar" in text_lower or "revenue" in text_lower:
         st.session_state.revenue += amount
         return f"Automatically identified a sale! Logged +{amount:,.2f} Naira to Revenue."
@@ -146,82 +425,39 @@ def parse_financial_statement(statement_text):
         st.session_state.other_expenses += amount
         return f"Categorized generic ledger transaction entry: -{amount:,.2f} Naira logged."
 
-# =====================================================================
-# TAB SEPARATION ROUTER INTERFACES
-# =====================================================================
+# FIXED: Safely calling matching translations across loops
 tab1, tab2, tab3 = st.tabs([labels["diagnose_tab"], labels["calendar_tab"], labels["finance_tab"]])
 
-# --- TAB 1: DIAGNOSTIC & PICTURE SELECTION MODES ---
+# --- TAB 1: SCREEN REFERENCE SELECTION INPUTS ---
 with tab1:
     col_chat, col_viewer = st.columns([1.1, 0.9])
-    
     with col_chat:
         st.markdown(f"### {labels['diagnose_tab']}")
         text_key = f"text_symptom_{st.session_state.input_counter}"
-        user_input_str = st.text_input(labels["text_input_label"], key=text_key)
+        audio_key = f"audio_symptom_{st.session_state.input_counter}"
+        
+        user_text = st.text_input(labels["text_input_label"], key=text_key)
         
         col_aud1, col_aud2 = st.columns(2)
         with col_aud1:
-            st.audio_input("Record audio symptoms / Rikodin sauti:", key=f"aud_in_{st.session_state.input_counter}")
+            user_audio = st.audio_input("Record audio symptoms / Rikodin sauti:", key=audio_key)
         with col_aud2:
-            st.file_uploader("Upload audio file / Dorawa sauti:", type=["wav", "mp3", "m4a", "ogg"], key=f"aud_up_{st.session_state.input_counter}")
+            uploaded_audio = st.file_uploader(
+                "Upload audio file / Dorawa sauti:", type=["wav", "mp3", "m4a", "ogg"],
+                key=f"audio_file_uploader_{st.session_state.input_counter}"
+            )
             
+        if uploaded_audio is not None and user_audio is None:
+            user_audio = uploaded_audio
+
         col_btn1, col_btn2 = st.columns(2)
         with col_btn1:
             if st.button(labels["submit_btn"], type="primary", key="main_diagnostic_trigger"):
-                cleaned_query = user_input_str.strip().lower()
-                if cleaned_query:
-                    # 1. HAUSA CUSTOM PROMPT MATCHING LAYER
-                    if selected_lang == "Hausa" and cleaned_query == "cutar tomatir":
-                        st.session_state.current_book_name = "VegetablesbyBayerTomatoDiseaseGuide_ha.pdf"
-                        st.session_state.current_page_num = "15"
-                        st.session_state.current_page_img = os.path.join(ASSETS_DIR, "hausa_tomato.png")
-                        st.session_state.last_ai_response = (
-                            "**Tabbataccen Bayani Daga Littafi:** **CUTAR BAKTERIAL PECK / 13 Raunuka a kan 'ya'yan itacen ja masu nunannu. "
-                            "Raunukan petiole da ganyen da ke taruwa Raunuka masu zagaye, masu siffar kwallo a saman takardar abaxial. "
-                            "Raunuka a kan 'ya'yan itacen kore. (An bayar da izinin Enrico Biondi, Sashen Kimiyyar Noma, Jami'ar Bologna) "
-                            "Machine Translated by Google\n\nAllahyabadaamfaninonomaialbarka!Madaninogari!"
-                        )
-# 2. ENGLISH CUSTOM PROMPT MATCHING LAYER
-# 1. Capture the user input from your text box
-user_query = st.text_input("Enter your plant disease symptoms / Shigar da alamun rashin lafiya:")
-
-# FIX: Define 'cleaned_query' so Python can read it in the layers below
-cleaned_query = user_query.strip().lower()
-
-# 2. Your conditional string matching layers start here
-if selected_lang == "English" and cleaned_query == "some other query":
-    pass
-
-if selected_lang == "English" and cleaned_query == "tomato foliage blighting brown patches":
-    st.session_state.current_book_name = "Concise-Encyclopedia-of-Plant-Diseases.pdf"
-    st.session_state.current_page_num = "44"
-    st.session_state.current_page_img = os.path.join(ASSETS_DIR, "english_tomato.png")
-    st.session_state.last_ai_response = (
-        "**Verified Reference Textbook Entry:**\n\n"
-        "Offline Semantic Match:\n\n"
-        "Causal Agents Alternaria tomatophila Alternaria solani\n"
-        "Distribution Worldwide Symptoms Symptoms may develop on leaves, stems and fruit and typically appear "
-        "first on older leaves as irregular, dark- brown, necrotic lesions. These lesions expand as disease "
-        "progresses and they eventually develop concentric, black rings, which give early blight lesions a "
-        "target-board appearance. A chlorotic area often surrounds leaf lesions. If there are numerous lesions "
-        "on a leaf, then the entire leaf will turn yellow and senesce. Complete defoliation of plants can occur "
-        "when conditions are favorable for disease development. Lesions may appear as dark- brown, elongated, "
-        "sunken areas on stems and petioles. Lesion development at the soil line can result in collar rot that "
-        "may girdle stems. Fruit lesions often occur at the calyx end and are dark, leathery and sunken.\n\n"
-        "Conditions for Disease Development Alternaria tomatophila and A. solani generally survive from season "
-        "to season on plant debris in the soil. Volunteer tomatoes, potatoes and solanaceous weeds can also serve "
-        "as inoculum sources. Infection and sporulation occur during periods of warm (24-29°C), humid or rainy "
-        "weather. Conidia are disseminated from sporulating lesions by wind and rain. Early blight spreads rapidly "
-        "when favorable conditions persist. This disease can also be serious in arid climates when dew periods are "
-        "frequent or when the crop is sprinkler- irrigated.\n\n"
-        "Control A fungicide spray program combined with an early blight forecasting system is the most effective "
-        "means of controlling this disease. Use field sanitation techniques such as crop rotation and weed control, "
-        "and turn under or remove debris from previous crops to reduce disease severity. Mature plant with severe "
-        "infestation of early blight. Circular, coalescing early blight lesions. (Courtesy of Gerald Holmes, "
-        "California State University, San Luis Obispo, Bugwood.org) Tomato Disease Field Guide 42 / EARLY BLIGHT"
-    )
-    with col_btn2:
+                if user_text.strip():
+                    with st.spinner("Analyzing symptoms..." if selected_lang == "English" else "Ana duba alamun..."):
+                        st.session_state.saved_user_text = user_text
+                        st.session_state.last_ai_response = run_ai_advisory(user_text, selected_lang)
+        with col_btn2:
             if st.button("Delete & Clear Inputs / Goge Bayanai", key="clear_inputs_btn"):
                 st.session_state.input_counter += 1
                 st.session_state.current_page_img = None
@@ -230,22 +466,32 @@ if selected_lang == "English" and cleaned_query == "tomato foliage blighting bro
                 st.session_state.last_ai_response = None
                 st.rerun()
 
-            if st.session_state.last_ai_response:
-                st.markdown("---")
-                st.subheader("Advisor Response" if selected_lang == "English" else "Shafar Shawarwari")
-                st.write(st.session_state.last_ai_response)
+        # Render the text response inside the chat column
+        if st.session_state.get("last_ai_response"):
+            st.markdown("---")
+            st.subheader("Advisor Response" if selected_lang == "English" else "Shafar Shawarwari")
+            st.write(st.session_state.last_ai_response)
 
+    # --- COLUMN 2: ENCYCLOPEDIA REFERENCE VIEWER ---
     with col_viewer:
         st.subheader("Encyclopedia Reference Viewer" if selected_lang == "English" else "Shafar Karatun Littafi")
+        
+        # FIXED: This visual page drawer now coordinates states cleanly without rerun interruptions
         if st.session_state.current_page_img and os.path.exists(st.session_state.current_page_img):
             st.markdown(f"**Source Document:** `{st.session_state.current_book_name}`")
             st.markdown(f"**Verified Matches Located on Page:** `{st.session_state.current_page_num}`")
-            st.image(st.session_state.current_page_img, caption="Rendered complete offline reference page.", use_container_width=True)
+            st.image(
+                st.session_state.current_page_img,
+                caption="Authentic textbook reference page rendered completely offline." if selected_lang == "English" else "Hoton littafi na gaskiya da aka ciro ba tare da intanet ba.",
+                use_container_width=True
+            )
         else:
-            if selected_lang == "English":
-                st.info("When you search for crop symptoms, the authentic visual textbook page matching your diagnosis will render here instantly completely offline.")
-            else:
-                st.info("Lokacin da kace bincika alamun cututtuka, shafin littafi gaskiyan agaske wanda ya dace da gano ku za i fito anan take ba tare da intanet ba.")
+            default_info = (
+                "When you search for crop symptoms, the authentic visual textbook page matching your diagnosis will render here instantly completely offline."
+            ) if selected_lang == "English" else (
+                "Lokacin da kace bincika alamun cututtuka, shafin littafi gaskiyan agaske wanda ya dace da gano ku zai fito anan take ba tare da intanet ba."
+            )
+            st.info(default_info)
 
 # --- TAB 2: TIMELINE METRIC ENGINE ---
 with tab2:
@@ -254,111 +500,26 @@ with tab2:
     if st.button(labels["calc_btn"], key="tab2_generate_timeline_btn"):
         st.text(calculate_crop_timeline(selected_crop, planting_date))
 
-# --- TAB 3: FINANCIAL LEDGER TRACKER ---
+# --- TAB 3: FINANCIAL LEDGER ---
 with tab3:
     st.markdown("### Enter New Transactions / Shigar da Kudi")
-    nlp_statement = st.text_input(labels["ledger_input"], key=f"nlp_stmt_{st.session_state.input_counter}")
-    
-    if st.button(labels["log_btn"]):
-        if nlp_statement.strip():
-            # Error fallback trigger for sentence transformers rule as specified
-            st.error("⚠️ Sentence-Transformer Vector Arrays are completely disabled for this high-speed offline interface engine.")
-            st.info("Please utilize the step manual direct inputs layout dashboard modules down below to register financial values safely.")
-
-    st.markdown("---")
-    col_in1, col_in2 = st.columns(2)
-    with col_in1:
-        sale_input = st.number_input("Crop Sales Revenue (Naira):", min_value=0.0, step=500.0, key="sale_in")
-        if st.button("Add to Sales / Kara Kudin Sayarwa"):
-            st.session_state.revenue += sale_input
-            st.success(f"Added +{sale_input:,.2f} Naira to Sales!")
-            st.rerun()
-        
-        labour_input = st.number_input("Labour & Worker Cost (Naira):", min_value=0.0, step=500.0, key="labour_in")
-        if st.button("Add to Labour / Kara Kudin Lebur"):
-            st.session_state.labour_cost += labour_input
-            st.success(f"Added -{labour_input:,.2f} Naira to Labour!")
-            st.rerun()
-
-    with col_in2:
-        fert_input = st.number_input("Fertilizer & Chemicals Cost (Naira):", min_value=0.0, step=500.0, key="fert_in")
-        if st.button("Add to Fertilizer / Kara Kudin Taki"):
-            st.session_state.fertilizer_cost += fert_input
-            st.success(f"Added -{fert_input:,.2f} Naira to Fertilizer!")
-            st.rerun()
-
-        equip_input = st.number_input("Equipment & Tractor Rental (Naira):", min_value=0.0, step=500.0, key="equip_in")
-        if st.button("Add to Equipment / Kara Kudin Kayan Aiki"):
-            st.session_state.equipment_cost += equip_input
-            st.success(f"Added -{equip_input:,.2f} Naira to Equipment!")
-            st.rerun()
-
-    st.markdown("---")
-    st.markdown("### Farm Profit & Loss Summary / Bayanin Riba da Asara")
-    
-    # Correct calculation layout
-    total_costs = (
-        st.session_state.labour_cost + 
-        st.session_state.fertilizer_cost + 
-        st.session_state.equipment_cost
+    nlp_statement = st.text_input(
+        labels["ledger_input"],
+        key=f"nlp_stmt_{st.session_state.get('input_counter', 0)}"
     )
     
-    net_profit = st.session_state.revenue - total_costs
-
-    st.metric("Total Sales Revenue / Kudin Sayarwa (+)", f"{st.session_state.revenue:,.2f} Naira")
-    col_metrics1, col_metrics2 = st.columns(2)
-    with col_metrics1:
-        st.metric("Labour Costs / Kudin Lebur (-)", f"{st.session_state.labour_cost:,.2f} Naira")
-        st.metric("Fertilizer & Chemicals / Kudin Taki (-)", f"{st.session_state.fertilizer_cost:,.2f} Naira")
-    with col_metrics2:
-        st.metric("Equipment & Tractor / Kayan Aiki (-)", f"{st.session_state.equipment_cost:,.2f} Naira")
-        st.metric("Other Expenses / Kudaden Fitarwa (-)", f"{st.session_state.other_expenses:,.2f} Naira")
-
-    st.markdown("---")
-    if net_profit >= 0:
-        st.success(f"**Net Profit / Riba Ta Tabbata:** {net_profit:,.2f} Naira")
-    else:
-        st.error(f"**Net Operating Loss / Asara Ta Fito:** {abs(net_profit):,.2f} Naira")
-
-    if st.button("Reset Ledger / Goge Dukan Bayanan Kudi", type="secondary"):
-        st.session_state.revenue = 0.0
-        st.session_state.labour_cost = 0.0
-        st.session_state.fertilizer_cost = 0.0
-        st.session_state.equipment_cost = 0.0
-        st.session_state.other_expenses = 0.0
-        st.success("Ledger cleared successfully!")
-        st.rerun()
-
-    st.subheader("Save Records Locally")
-    current_ledger_data = {
-        "Revenue": [st.session_state.revenue],
-        "LabourCost": [st.session_state.labour_cost],
-        "FertilizerCost": [st.session_state.fertilizer_cost],
-        "EquipmentCost": [st.session_state.equipment_cost],
-        "OtherExpenses": [st.session_state.other_expenses]
-    }
-
-    if st.button("Save Ledger to Laptop", key="save_ledger_tab3_btn"):
-        try:
-            import pandas as pd
-            df = pd.DataFrame(current_ledger_data)
-            file_name = "ledger_backup.csv"
-            df.to_csv(file_name, index=False)
-            st.success(f"Saved successfully to your laptop at:\n`{os.path.abspath(file_name)}`")
-        except Exception as e:
-            st.error(f"Failed to save: {e}")
-
-    st.markdown("---")
-    st.subheader("Download Ledger File")
-    try:
-        import pandas as pd
-        df = pd.DataFrame(current_ledger_data)
-        csv_data = df.to_csv(index=False).encode('utf-8')
-        st.download_button(label="⬇ Download Ledger as CSV", data=csv_data, file_name="ledger_download.csv", mime="text/csv", key="download_ledger_tab3_btn")
-    except Exception:
-        st.info("Please fill in or save your ledger data above to enable downloading.")
-
-# --- ADVISORY DISPLAY ENGINE ---
-if st.session_state.get("last_ai_response"):
-    st.markdown("### 📋 Diagnostic Results / Sakamakon Bincike")
-    st.markdown(st.session_state.last_ai_response)
+    if st.button(labels["log_btn"]):
+        if nlp_statement:
+            # Safely unpack the single number matrix directly from your custom parser
+            text_lower = nlp_statement.lower()
+            numbers = [float(s) for s in re.findall(r'\d+', text_lower)]
+            amount = numbers[0] if numbers else 0.0
+            
+            # Context transaction classification layout engine routing rules
+            if "sold" in text_lower or "sayar" in text_lower or "revenue" in text_lower:
+                st.session_state.revenue += amount
+                st.info(f"Automatically identified a sale! Logged +{amount:,.2f} Naira to Revenue.")
+            elif "labour" in text_lower or "lebur" in text_lower or "worker" in text_lower:
+                st.session_state.labour_cost += amount
+                st.info(f"Logged -{amount:,.2f} Naira to Labour Costs.")
+            elif "fertilizer" in text_lower or "taki" in text_lower or "chemical" in text_lower:
